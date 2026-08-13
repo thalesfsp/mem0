@@ -55,6 +55,11 @@ class MemoryConfig(BaseModel):
         description="Custom instructions for fact extraction",
         default=None,
     )
+    near_duplicate_threshold: Optional[float] = Field(
+        description="Cosine similarity at/above which a new fact is treated as a "
+        "duplicate of an existing memory and skipped. Defaults to NEAR_DUPLICATE_THRESHOLD.",
+        default=None,
+    )
 
 
 class AzureConfig(BaseModel):

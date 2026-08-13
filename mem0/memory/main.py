@@ -54,6 +54,13 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*swigva
 # Initialize logger early for util functions
 logger = logging.getLogger(__name__)
 
+# Cosine similarity (vector store's own score, since the new fact's embedding is
+# reused for the lookup) at or above which a newly extracted fact is treated as a
+# semantic duplicate of an existing memory and skipped on insert. 0.92 is high
+# enough to let related-but-distinct facts through while catching reworded
+# restatements of the same fact (e.g. "X wants Y" vs "X wants Y done").
+NEAR_DUPLICATE_THRESHOLD = 0.92
+
 
 # Fields that hold runtime auth/connection objects and must be preserved.
 # These are non-serializable objects (e.g. AWSV4SignerAuth, RequestsHttpConnection)
@@ -801,6 +808,14 @@ class Memory(MemoryBase):
                 logger.debug(f"Skipping duplicate memory (hash match): {text[:50]}")
                 continue
             seen_hashes.add(mem_hash)
+
+            # Near-duplicate gate: reuse the embedding already computed above (no
+            # second embedding call) to look up the closest existing memory.
+            near_dup = self.vector_store.search(query=text, vectors=embed_map[text], top_k=1, filters=search_filters)
+            threshold = self.config.near_duplicate_threshold or NEAR_DUPLICATE_THRESHOLD
+            if near_dup and near_dup[0].score is not None and near_dup[0].score >= threshold:
+                logger.debug(f"Skipping near-duplicate memory (score={near_dup[0].score:.3f}): {text[:50]}")
+                continue
 
             text_lemmatized = lemmatize_for_bm25(text)
 
@@ -2215,6 +2230,16 @@ class AsyncMemory(MemoryBase):
                 logger.debug(f"Skipping duplicate memory (hash match, async): {text[:50]}")
                 continue
             seen_hashes.add(mem_hash)
+
+            # Near-duplicate gate: reuse the embedding already computed above (no
+            # second embedding call) to look up the closest existing memory.
+            near_dup = await asyncio.to_thread(
+                self.vector_store.search, query=text, vectors=embed_map[text], top_k=1, filters=search_filters
+            )
+            threshold = self.config.near_duplicate_threshold or NEAR_DUPLICATE_THRESHOLD
+            if near_dup and near_dup[0].score is not None and near_dup[0].score >= threshold:
+                logger.debug(f"Skipping near-duplicate memory (score={near_dup[0].score:.3f}, async): {text[:50]}")
+                continue
 
             text_lemmatized = lemmatize_for_bm25(text)
 

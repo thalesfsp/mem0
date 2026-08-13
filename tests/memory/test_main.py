@@ -1,10 +1,11 @@
+import json
 import logging
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, Mock
 
 import pytest
 
-from mem0.memory.main import AsyncMemory, Memory
+from mem0.memory.main import NEAR_DUPLICATE_THRESHOLD, AsyncMemory, Memory
 
 
 def _setup_mocks(mocker):
@@ -663,3 +664,142 @@ async def test_async_update_preserves_actor_id_when_different_actor_updates(mock
     assert stored["actor_id"] == "Alice"
 
 
+class TestNearDuplicateGate:
+    """Tests for the near-duplicate insert gate in _add_to_vector_store()."""
+
+    NEAR_DUP_FACTS = [
+        "thales wants Sonnet 5 at 'high' effort used for executing dev workflow tasks",
+        "thales wants execution done with Sonnet 5 at 'high' effort",
+        "thales wants task execution to be done with Sonnet 5 at 'high' effort",
+    ]
+
+    def _memory_with_llm_facts(self, mocker, facts):
+        memory = _build_memory_instance(mocker, Memory)
+        memory.config.near_duplicate_threshold = None
+        memory.db.get_last_messages.return_value = []
+        memory.embedding_model.embed.return_value = [0.1, 0.2, 0.3]
+        memory.embedding_model.embed_batch.return_value = [[0.1, 0.2, 0.3] for _ in facts]
+        memory.llm.generate_response.return_value = json.dumps({"memory": [{"text": f} for f in facts]})
+        return memory
+
+    def test_new_fact_inserts_when_no_near_duplicate(self, mocker):
+        """Happy path: a genuinely new fact with no close match still inserts."""
+        memory = self._memory_with_llm_facts(mocker, ["Thales likes coffee"])
+        memory.vector_store.search.side_effect = [
+            [],  # Phase 1: no existing memories
+            [],  # near-dup lookup for the new fact: no match
+        ]
+
+        result = memory._add_to_vector_store(
+            messages=[{"role": "user", "content": "I like coffee"}], metadata={}, filters={}, infer=True
+        )
+
+        assert len(result) == 1
+        assert result[0]["memory"] == "Thales likes coffee"
+        memory.vector_store.insert.assert_called_once()
+
+    def test_near_duplicate_fact_is_rejected(self, mocker):
+        """Bad path: a reworded restatement of an existing memory is rejected."""
+        memory = self._memory_with_llm_facts(mocker, [self.NEAR_DUP_FACTS[1]])
+        existing = MagicMock()
+        existing.id = "existing-1"
+        existing.score = NEAR_DUPLICATE_THRESHOLD + 0.03
+        existing.payload = {"data": self.NEAR_DUP_FACTS[0], "hash": "unrelated-hash"}
+        memory.vector_store.search.side_effect = [
+            [],  # Phase 1 candidates (unused by the gate itself, only the hash set)
+            [existing],  # near-dup lookup finds a close match
+        ]
+
+        result = memory._add_to_vector_store(
+            messages=[{"role": "user", "content": "use sonnet 5 high effort"}], metadata={}, filters={}, infer=True
+        )
+
+        assert result == []
+        memory.vector_store.insert.assert_not_called()
+
+    def test_exact_duplicate_still_rejected_by_hash_path(self, mocker):
+        """Edge case: an exact-text duplicate is still caught by the MD5 hash gate,
+        and the near-duplicate gate's search is never reached for it."""
+        text = self.NEAR_DUP_FACTS[0]
+        import hashlib
+
+        mem_hash = hashlib.md5(text.encode()).hexdigest()
+        memory = self._memory_with_llm_facts(mocker, [text])
+        existing = MagicMock()
+        existing.id = "existing-1"
+        existing.score = 0.99
+        existing.payload = {"data": text, "hash": mem_hash}
+        # Only ONE vector_store.search call is expected (Phase 1) — the hash
+        # match short-circuits before the near-dup gate's own search call.
+        memory.vector_store.search.side_effect = [[existing]]
+
+        result = memory._add_to_vector_store(
+            messages=[{"role": "user", "content": text}], metadata={}, filters={}, infer=True
+        )
+
+        assert result == []
+        memory.vector_store.insert.assert_not_called()
+        assert memory.vector_store.search.call_count == 1
+
+    def test_similarity_just_below_threshold_still_inserts(self, mocker):
+        """Edge case: a candidate just under the threshold does not block the insert."""
+        memory = self._memory_with_llm_facts(mocker, [self.NEAR_DUP_FACTS[2]])
+        existing = MagicMock()
+        existing.id = "existing-1"
+        existing.score = NEAR_DUPLICATE_THRESHOLD - 0.01
+        existing.payload = {"data": self.NEAR_DUP_FACTS[0], "hash": "unrelated-hash"}
+        memory.vector_store.search.side_effect = [
+            [],
+            [existing],
+        ]
+
+        result = memory._add_to_vector_store(
+            messages=[{"role": "user", "content": "use sonnet 5 high effort"}], metadata={}, filters={}, infer=True
+        )
+
+        assert len(result) == 1
+        memory.vector_store.insert.assert_called_once()
+
+    def test_empty_candidate_set_inserts(self, mocker):
+        """Edge case: an empty near-dup search result (e.g. first memory ever) inserts."""
+        memory = self._memory_with_llm_facts(mocker, ["Thales lives in Miami"])
+        memory.vector_store.search.side_effect = [
+            [],  # Phase 1: nothing exists yet
+            [],  # near-dup lookup: empty candidate set
+        ]
+
+        result = memory._add_to_vector_store(
+            messages=[{"role": "user", "content": "I live in Miami"}], metadata={}, filters={}, infer=True
+        )
+
+        assert len(result) == 1
+        memory.vector_store.insert.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_async_near_duplicate_fact_is_rejected(self, mocker):
+        """The async _add_to_vector_store() path enforces the same near-dup gate."""
+        memory = _build_memory_instance(mocker, AsyncMemory)
+        memory.config.near_duplicate_threshold = None
+        memory.db.get_last_messages.return_value = []
+        memory.embedding_model.embed.return_value = [0.1, 0.2, 0.3]
+        memory.embedding_model.embed_batch.return_value = [[0.1, 0.2, 0.3]]
+        memory.llm.generate_response.return_value = json.dumps({"memory": [{"text": self.NEAR_DUP_FACTS[2]}]})
+
+        existing = MagicMock()
+        existing.id = "existing-1"
+        existing.score = NEAR_DUPLICATE_THRESHOLD + 0.01
+        existing.payload = {"data": self.NEAR_DUP_FACTS[0], "hash": "unrelated-hash"}
+        memory.vector_store.search.side_effect = [
+            [],
+            [existing],
+        ]
+
+        result = await memory._add_to_vector_store(
+            messages=[{"role": "user", "content": "use sonnet 5 high effort"}],
+            metadata={},
+            effective_filters={},
+            infer=True,
+        )
+
+        assert result == []
+        memory.vector_store.insert.assert_not_called()
