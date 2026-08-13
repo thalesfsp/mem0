@@ -119,10 +119,7 @@ def main() -> int:
         print(f"\nURLs in docs/llms.txt with no matching .mdx page ({len(stale)}):")
         for p in stale:
             print(f"  - {p}")
-        print(
-            "\n(Stale URLs are never auto-removed: check whether the page was "
-            "renamed, and update the link by hand.)"
-        )
+        print("\n(Stale URLs are never auto-removed: check whether the page was renamed, and update the link by hand.)")
 
     if not missing and not stale:
         print("docs/llms.txt is in sync with docs/**/*.mdx.")
@@ -132,10 +129,7 @@ def main() -> int:
         if missing:
             new_text = append_triage_block(text, missing)
             LLMS_TXT.write_text(new_text)
-            print(
-                f"\nAppended {len(missing)} placeholder entries under "
-                f"'{TRIAGE_HEADER}' in docs/llms.txt."
-            )
+            print(f"\nAppended {len(missing)} placeholder entries under '{TRIAGE_HEADER}' in docs/llms.txt.")
         else:
             print("\nNo additions to scaffold; stale URLs surfaced above require manual cleanup.")
         return 0
