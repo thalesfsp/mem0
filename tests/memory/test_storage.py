@@ -198,7 +198,7 @@ class TestSQLiteManager:
             sqlite_manager.add_history(
                 memory_id=sample_data["memory_id"],
                 old_memory=f"Memory {i}",
-                new_memory=f"Memory {i+1}",
+                new_memory=f"Memory {i + 1}",
                 event="ADD" if i == 0 else "UPDATE",
                 created_at=ts,
                 updated_at=ts if i > 0 else None,
