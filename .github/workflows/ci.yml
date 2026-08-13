@@ -109,8 +109,15 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -e ".[test,graph,vector_stores,llms,extras]"
-          pip install ruff
         if: steps.cached-hatch-dependencies.outputs.cache-hit != 'true'
+      # Installed unconditionally and from the pin in pyproject.toml's dev
+      # extra. It used to be a bare `pip install ruff` inside the cache-miss
+      # branch, which meant two things: the version drifted with every ruff
+      # release, and on a cache hit no version was asserted at all. Ruff 0.16.0
+      # changed the default rule set and turned this job red across the whole
+      # tree; before that it had not run green on main since 2026-05-17.
+      - name: Install the pinned linter
+        run: pip install -e ".[dev]"
       - name: Run Linting
         run: make lint
       - name: Run tests and generate coverage report
